@@ -1,0 +1,41 @@
+name: Update term dates
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # every Monday 06:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Refresh each school's term dates
+        run: |
+          set -e
+          for school_dir in schools/*/; do
+            school_dir="${school_dir%/}"
+            echo "== ${school_dir} =="
+            python "${school_dir}/term_dates.py" -o "${school_dir}/term_dates.json"
+            python scripts/ics_export.py -i "${school_dir}/term_dates.json" -o "${school_dir}/term_dates.ics"
+          done
+
+      - name: Commit changes if any
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add schools/*/term_dates.json schools/*/term_dates.ics
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update term dates ($(date -u +%Y-%m-%d))"
+            git push
+          fi
