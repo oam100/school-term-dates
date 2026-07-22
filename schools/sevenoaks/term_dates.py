@@ -31,6 +31,7 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2]
 import common
 
 DEFAULT_URLS = [
+    "https://www.sevenoaksprimary.co.uk/Parents/Term-Dates-2025-2026/",
     "https://www.sevenoaksprimary.co.uk/Parents/Term-Dates-2026-2027/",
     "https://www.sevenoaksprimary.co.uk/Parents/Term-Dates-2027-2028/",
 ]
