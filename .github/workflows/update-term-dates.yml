@@ -33,8 +33,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add schools/*/term_dates.json schools/*/term_dates.ics
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
+          # Gate on the JSON diff only: the ICS file's DTSTAMP changes every
+          # run even when the underlying term data hasn't, so diffing the
+          # ICS too would cause a commit every single run regardless.
+          if git diff --cached --quiet -- schools/*/term_dates.json; then
+            echo "No changes to term data - skipping commit"
           else
             git commit -m "Update term dates ($(date -u +%Y-%m-%d))"
             git push
