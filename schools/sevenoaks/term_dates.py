@@ -11,6 +11,10 @@ terms merged into one sorted list before computing holiday gaps -- this is
 what makes the summer gap between academic years show up as a single
 continuous holiday block instead of two disjoint ones.
 
+The year pages are discovered by URL pattern rather than hardcoded: every
+academic year from last year to YEARS_AHEAD ahead is tried, and pages that
+don't exist (not yet published, or already taken down) are skipped.
+
 Produces JSON via common.write_term_dates_json:
 - holidays: date-range blocks for the gaps between terms
 - terms: date-range blocks for each term (first/last day back)
@@ -30,11 +34,8 @@ from html.parser import HTMLParser
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2] / "scripts"))
 import common
 
-DEFAULT_URLS = [
-    "https://www.sevenoaksprimary.co.uk/Parents/Term-Dates-2025-2026/",
-    "https://www.sevenoaksprimary.co.uk/Parents/Term-Dates-2026-2027/",
-    "https://www.sevenoaksprimary.co.uk/Parents/Term-Dates-2027-2028/",
-]
+URL_TEMPLATE = "https://www.sevenoaksprimary.co.uk/Parents/Term-Dates-{start}-{end}/"
+YEARS_AHEAD = 2
 LABEL = "S’oaks"
 
 TERM_HEADER_RE = re.compile(r"TERM\s*\d+\s*[-–—]\s*(\d{4})", re.I)
@@ -184,16 +185,30 @@ def extract_terms(tables: list[list[list[list[str]]]]) -> list[common.Term]:
     return terms
 
 
+def candidate_urls(today: date | None = None) -> list[str]:
+    """Year-page URLs from last academic year to YEARS_AHEAD years ahead."""
+    today = today or date.today()
+    current_start = today.year if today.month >= 9 else today.year - 1
+    return [
+        URL_TEMPLATE.format(start=y, end=y + 1)
+        for y in range(current_start - 1, current_start + YEARS_AHEAD + 1)
+    ]
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--url", nargs="*", default=DEFAULT_URLS,
-        help="one or more term-dates page URLs (defaults to the known academic-year pages)",
+        "--url", nargs="*", default=None,
+        help="one or more term-dates page URLs (default: discover academic-year pages around today)",
     )
     parser.add_argument(
         "-o", "--output",
         default=None,
         help="output JSON path (default: term_dates.json next to this script)",
+    )
+    parser.add_argument(
+        "--min-months", type=int, default=9,
+        help="fail unless term dates reach this many months ahead (default: 9)",
     )
     parser.add_argument("--quiet", action="store_true", help="suppress the stdout summary")
     args = parser.parse_args(argv)
@@ -204,26 +219,36 @@ def main(argv: list[str]) -> int:
 
         output_path = str(pathlib.Path(__file__).parent / "term_dates.json")
 
+    # Missing or unparseable pages are skipped with a warning; whether
+    # enough data survived is decided by finalize_term_dates' coverage check.
+    urls = args.url or candidate_urls()
     all_terms: list[common.Term] = []
+    pages_used = 0
     total_tables = 0
-    for url in args.url:
-        html = common.fetch_html(url)
+    for url in urls:
+        try:
+            html = common.fetch_html(url)
+        except common.FetchError as e:
+            common.warn(f"skipping page: {e}")
+            continue
         html_parser = LabeledRowTableParser()
         html_parser.feed(html)
         if not html_parser.tables:
-            print(f"Error: no tables found on {url} — site structure may have changed", file=sys.stderr)
-            return 2
+            common.warn(f"skipping {url}: no tables found — site structure may have changed")
+            continue
+        try:
+            terms = extract_terms(html_parser.tables)
+        except ValueError as e:
+            common.warn(f"skipping {url}: {e}")
+            continue
+        pages_used += 1
         total_tables += len(html_parser.tables)
-        all_terms.extend(extract_terms(html_parser.tables))
+        all_terms.extend(terms)
 
-    if not all_terms:
-        print("Error: no terms parsed from any page", file=sys.stderr)
-        return 2
-
-    result = common.write_term_dates_json(all_terms, output_path, label=LABEL)
+    result = common.finalize_term_dates(all_terms, output_path, label=LABEL, min_months=args.min_months)
 
     if not args.quiet:
-        print(f"Parsed {len(all_terms)} terms from {len(args.url)} page(s), {total_tables} table(s)")
+        print(f"Parsed {len(all_terms)} terms from {pages_used} page(s), {total_tables} table(s)")
         print(f"  {len(result['holidays'])} holiday blocks")
         print(f"  {len(result['terms'])} term blocks")
         print(f"  {len(result['inset_days'])} inset days")

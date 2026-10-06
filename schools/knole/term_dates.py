@@ -11,6 +11,7 @@ Produces JSON via common.write_term_dates_json:
 import argparse
 import re
 import sys
+from datetime import date, datetime
 from html.parser import HTMLParser
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2] / "scripts"))
@@ -20,8 +21,10 @@ DEFAULT_URL = "https://www.knoleacademy.org/our-school/term-dates/"
 LABEL = "Knole"
 
 ANNOTATION_RE = re.compile(r"\s*\([^)]*\)\s*$")
+# The year is optional: the site occasionally omits it (e.g. "Friday 5th
+# November"), in which case parse_date infers it from a nearby date.
 DATE_RE = re.compile(
-    r"^\s*[A-Za-z]+\s+(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)\s+(\d{4})\s*$"
+    r"^\s*([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)(?:\s+(\d{4}))?\s*$"
 )
 
 
@@ -75,38 +78,60 @@ class TablePressParser(HTMLParser):
             self._in_table = False
 
 
-def parse_date(raw: str):
+def parse_date(raw: str, near: date | None = None) -> date:
+    """Parse e.g. "Friday 5th November 2027".
+
+    When the year is missing, pick the year within one of `near`'s whose
+    date falls on the stated weekday, closest to `near` -- so "Friday 5th
+    November" in a 2027/28 term resolves to 2027.
+    """
     cleaned = ANNOTATION_RE.sub("", raw).strip()
     match = DATE_RE.match(cleaned)
     if not match:
         raise ValueError(f"Could not parse date: {raw!r}")
-    day, month_name, year = match.groups()
+    weekday_name, day, month_name, year = match.groups()
     try:
-        from datetime import date, datetime
-
         month = datetime.strptime(month_name.capitalize(), "%B").month
-        return date(int(year), month, int(day))
+        if year is not None:
+            return date(int(year), month, int(day))
     except ValueError as e:
         raise ValueError(f"Could not parse date: {raw!r} ({e})")
+
+    if near is None:
+        raise ValueError(f"Date has no year and no nearby date to infer it from: {raw!r}")
+    candidates = []
+    for y in (near.year - 1, near.year, near.year + 1):
+        try:
+            d = date(y, month, int(day))
+        except ValueError:
+            continue
+        if d.strftime("%A").lower() == weekday_name.lower():
+            candidates.append(d)
+    if not candidates:
+        raise ValueError(f"Could not infer year for {raw!r}: weekday doesn't match any year near {near}")
+    return min(candidates, key=lambda d: abs((d - near).days))
 
 
 def split_cell(cell: str) -> list[str]:
     return [part.strip() for part in cell.split("\n") if part.strip()]
 
 
-def extract_terms(tables: list[list[list[str]]]) -> list[common.Term]:
+def extract_terms(table: list[list[str]]) -> list[common.Term]:
     terms = []
-    for table in tables:
-        for row in table:
-            if len(row) < 4:
-                continue
-            number, start_raw, end_raw, staffdev_raw = row[0], row[1], row[2], row[3]
-            if not start_raw or not end_raw:
-                continue
+    for row in table:
+        if len(row) < 4:
+            continue
+        number, start_raw, end_raw, staffdev_raw = row[0], row[1], row[2], row[3]
+        if not start_raw or not end_raw:
+            continue
+        try:
             start = parse_date(start_raw)
+            end = parse_date(end_raw, near=start)
+        except ValueError:
             end = parse_date(end_raw)
-            staffdev_dates = [parse_date(d) for d in split_cell(staffdev_raw)]
-            terms.append(common.Term(number=number, start=start, end=end, staffdev_dates=staffdev_dates))
+            start = parse_date(start_raw, near=end)
+        staffdev_dates = [parse_date(d, near=start) for d in split_cell(staffdev_raw)]
+        terms.append(common.Term(number=number, start=start, end=end, staffdev_dates=staffdev_dates))
     return terms
 
 
@@ -118,6 +143,10 @@ def main(argv: list[str]) -> int:
         default=None,
         help="output JSON path (default: term_dates.json next to this script)",
     )
+    parser.add_argument(
+        "--min-months", type=int, default=9,
+        help="fail unless term dates reach this many months ahead (default: 9)",
+    )
     parser.add_argument("--quiet", action="store_true", help="suppress the stdout summary")
     args = parser.parse_args(argv)
 
@@ -127,21 +156,29 @@ def main(argv: list[str]) -> int:
 
         output_path = str(pathlib.Path(__file__).parent / "term_dates.json")
 
-    html = common.fetch_html(args.url)
+    # Each academic year is its own table. A table that fails to parse is
+    # skipped with a warning rather than failing the run; whether enough
+    # data survived is decided by finalize_term_dates' coverage check.
+    terms: list[common.Term] = []
+    tables: list[list[list[str]]] = []
+    try:
+        html_parser = TablePressParser()
+        html_parser.feed(common.fetch_html(args.url))
+        tables = html_parser.tables
+        if not tables:
+            common.warn(f"no tablepress tables found on {args.url} — site structure may have changed")
+    except common.FetchError as e:
+        common.warn(str(e))
+    for i, table in enumerate(tables, 1):
+        try:
+            terms.extend(extract_terms(table))
+        except ValueError as e:
+            common.warn(f"skipping table {i}: {e}")
 
-    html_parser = TablePressParser()
-    html_parser.feed(html)
-
-    if not html_parser.tables:
-        print("Error: no tablepress tables found on page — site structure may have changed", file=sys.stderr)
-        return 2
-
-    terms = extract_terms(html_parser.tables)
-
-    result = common.write_term_dates_json(terms, output_path, label=LABEL)
+    result = common.finalize_term_dates(terms, output_path, label=LABEL, min_months=args.min_months)
 
     if not args.quiet:
-        print(f"Parsed {len(terms)} terms from {len(html_parser.tables)} table(s)")
+        print(f"Parsed {len(terms)} terms from {len(tables)} table(s)")
         print(f"  {len(result['holidays'])} holiday blocks")
         print(f"  {len(result['terms'])} term blocks")
         print(f"  {len(result['inset_days'])} inset days")

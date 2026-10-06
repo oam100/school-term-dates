@@ -70,15 +70,28 @@ That token file lives outside this repo (`~/.config/...`) and must never be
 committed anywhere — it's not covered by this repo's `.gitignore` since it
 isn't inside the repo at all.
 
-## Known fragility
+## Failure handling
 
-Both scrapers fail loudly (non-zero exit) on structural page changes —
-missing tables, unparseable dates — rather than silently publishing empty
-or stale data. The Actions workflow relies on this: a failed scrape aborts
-before the commit step, so the last known-good feed stays published.
-Neither scraper detects a page changing in a way that still "parses" but
-produces wrong data (e.g. reordered columns) — a quieter failure mode
-that's out of scope here.
+Individual pages and tables are allowed to fail: a 404 (old academic-year
+pages get taken down; future ones may not exist yet) or an unparseable
+table is logged as a warning and skipped. Sevenoaks' year pages are found
+by trying every academic year from last year to two years ahead, so new
+years get picked up without code changes.
+
+The one hard requirement is coverage: after scraping, a school's data must
+reach at least 9 months from today (`--min-months` to change). If it
+doesn't, nothing is written and the script exits non-zero, so the last
+known-good feed stays published. The Actions workflow still refreshes and
+commits every other school, then fails the run so the problem is visible.
+
+Terms that have disappeared from the site (e.g. last year's page was
+removed) are kept from the previously committed `term_dates.json`, so past
+events don't vanish from subscribers' calendars. The live site always wins
+for any period it covers.
+
+A page changing in a way that still "parses" but produces wrong data
+(e.g. reordered columns) isn't detected -- a quieter failure mode that's
+out of scope here.
 
 Sevenoaks Primary's "Bank Holiday" rows are deliberately not included in
 the output — they're well-known public holidays, redundant with a

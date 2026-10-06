@@ -18,15 +18,26 @@ jobs:
         with:
           python-version: '3.12'
 
+      # One school failing (e.g. its data no longer reaches 9 months ahead)
+      # mustn't block the others: each school that succeeds is still
+      # committed, and the job is failed at the end if any school failed.
       - name: Refresh each school's term dates
+        id: refresh
         run: |
-          set -e
+          failed=""
           for school_dir in schools/*/; do
             school_dir="${school_dir%/}"
             echo "== ${school_dir} =="
-            python "${school_dir}/term_dates.py" -o "${school_dir}/term_dates.json"
-            python scripts/ics_export.py -i "${school_dir}/term_dates.json" -o "${school_dir}/term_dates.ics"
+            if python "${school_dir}/term_dates.py" -o "${school_dir}/term_dates.json" \
+              && python scripts/ics_export.py -i "${school_dir}/term_dates.json" -o "${school_dir}/term_dates.ics"; then
+              :
+            else
+              echo "::error::${school_dir} failed - keeping its last published feed"
+              git checkout -- "${school_dir}"
+              failed="${failed} ${school_dir}"
+            fi
           done
+          echo "failed=${failed}" >> "$GITHUB_OUTPUT"
 
       - name: Commit changes if any
         run: |
@@ -42,3 +53,9 @@ jobs:
             git commit -m "Update term dates ($(date -u +%Y-%m-%d))"
             git push
           fi
+
+      - name: Fail if any school failed
+        if: steps.refresh.outputs.failed != ''
+        run: |
+          echo "::error::Failed schools:${{ steps.refresh.outputs.failed }}"
+          exit 1
