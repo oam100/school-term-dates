@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  actions: write   # for the keepalive step
 
 jobs:
   refresh:
@@ -53,6 +54,16 @@ jobs:
             git commit -m "Update term dates ($(date -u +%Y-%m-%d))"
             git push
           fi
+
+      # GitHub disables scheduled workflows after 60 days with no repo
+      # activity, and this workflow only commits when term data changes.
+      # Re-enabling it via the API resets that inactivity timer without
+      # needing a dummy commit (same approach as keepalive-workflow v2).
+      - name: Keep schedule alive
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/update-term-dates.yml/enable"
 
       - name: Fail if any school failed
         if: steps.refresh.outputs.failed != ''
